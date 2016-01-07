@@ -1,0 +1,21 @@
+object HdfsWordCount {
+  def main(args: Array[String]) {
+  if (args.length < 2) {
+  System.err.printIn("Usage: HdfsWordCount <directory> <seconds>")
+  System.exit()
+  }
+  }
+  
+StreamingExamples.setStreamingLogLeveis()
+
+//新建 StreamingContext
+val conf = new SparkConf
+val ssc = new StreamingContext(conf, Seconds(args(1).tolnt))
+
+//创建DStream,并指向持定目录
+val lines = ssc.textFileStream(args(0))
+val words = lines.flatMap(_.split(""))
+val wordCounts = words.map(x => (x, 1)).reduceByKey(_ + _)
+wordCounts.print()
+ssc.start()
+ssc.awaitTermination()
