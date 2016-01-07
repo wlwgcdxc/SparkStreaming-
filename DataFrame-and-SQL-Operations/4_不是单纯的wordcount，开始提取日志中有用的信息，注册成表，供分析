@@ -1,0 +1,48 @@
+//python版，从目录下实时的读进来日志文件，提取出对应的事件，注册成表，供分析
+from __future__ import print_function
+import os
+import sys
+import json
+from pyspark import SparkContext
+from pyspark.streaming import StreamingContext
+from pyspark.sql import SQLContext, Row
+
+def getSqlContextInstance(sparkContext):
+    if ('sqlContextSingletonInstance' not in globals()):
+        globals()['sqlContextSingletonInstance'] = SQLContext(sparkContext)
+    return globals()['sqlContextSingletonInstance']
+
+def process(time, rdd):
+        print("========= %s =========" % str(time))
+        if (rdd.count() != 0):
+            try:
+                value = rdd.collect()
+                sqlContext = getSqlContextInstance(rdd.context)
+                for (table_name, table_set) in value:
+                    registerDBTable(table_name, table_set, sqlContext)
+                wordCountsDataFrame = sqlContext.sql("select * from SparkListenerApplicationStart")
+                wordCountsDataFrame.show()
+                wordCountsDataFrame1 = sqlContext.sql("select * from SparkListenerLogStart")
+                wordCountsDataFrame1.show()
+            except:
+                pass
+
+def getEvent(item):
+  json_format = json.loads(item)
+  key = json_format['Event']
+  value = json.dumps(json_format).replace(' ', '')
+  return (key, value)
+
+def registerDBTable(table_name, table_set, sqlContext):
+  lineRdd = sc.parallelize(table_set)
+  sqlContext.jsonRDD(lineRdd).registerTempTable(table_name)
+  return
+
+ssc = StreamingContext(sc, 4)
+
+lines = ssc.textFileStream("/opt/xcdong/data")
+words = lines.map(lambda line: getEvent(line)).groupByKey()
+windowDStream = words.window(86400, 4)
+windowDStream.foreachRDD(process)
+ssc.start()
+ssc.awaitTermination()
