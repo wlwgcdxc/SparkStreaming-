@@ -1,0 +1,33 @@
+这个实例更加灵活，可以比较灵活的使用当前新增的值和之前累加的值
+
+object StatefulNetworkWordCount {
+ def main(args: Array [String]){
+  if (args.length < 3) {
+  System.println{..Usage: StatefulNetworkWordCount <master> <hostname> <port> <seconds>\n'* + "In local mode, <master> should be 'local[n]' with n > 1")
+  System.exit(1)
+  }
+
+StreamingExamples . setStreamingLogLeveIs()
+
+//这个values就是本次传进来的一组序列值
+val updateFunc = (values: Seq[Int], state: Option[Int]) => { 
+  val currentCount = values.foldLeft(0)(_ + _) //这个拿到的是现在的值，即本次最新的值
+  val previousCount = state.getOrElse(0)//这个是之前的值，即之前累积的值
+  Some(currentCount + previousCount)//所有的值之和
+}
+
+//创建 StreamingContext
+val ssc = new StreamingContext(args(0), "StatefulNetworkWordCount",
+Seconds(args(3).tolnt), System.getenv("SPARK_HOME"), StreamingContext.jarOfClass{this.getClass)) 
+ssc. checkpoint (".")//在当前目录做个checkpoint
+
+//创建NetworkInputStream，需要指定ip和端口
+val lines = ssc.socketTextStream(args(l), args⑵.tolnt)
+val words = lines.flatMap(_.split(" "))
+val wordDstream = words.map(x => (x, 1))
+
+
+//使用updateStateByKey来更新状态
+val stateDstream = wordDstream.updateStateByKey[Int](updateFunc) stateDst ream.print()
+ssc.start()
+ssc.awaitTermination()
