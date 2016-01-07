@@ -1,0 +1,86 @@
+转载自：http://feed.askmaclean.com/archives/combining-spark-streaming-and-data-frames-for-near-real-time-log-analysis.html?utm_source=tuicool&utm_medium=referral
+
+package com.databricks.apps.logs
+//日志分析之后，想要得到的数据类型
+case class ApacheAccessLog(ipAddress: String, clientIdentd: String,
+ userId: String, dateTime: String, method: String,
+ endpoint: String, protocol: String,
+ responseCode: Int, contentSize: Long, 
+ referer: String, agent: String) {
+}
+//就是给出log，怎么把它解析成想要的数据类型
+object ApacheAccessLog {
+val PATTERN = """^(\S+) (\S+) (\S+) \[([\w\d:\/]+\s[+\-]\d{4})\] "(\S+) (\S+) (\S+)" (\d{3}) ([\d\-]+) "([^"]+)" "([^"]+)"""".r
+def parseLogLine(log: String): ApacheAccessLog = {
+ val res = PATTERN.findFirstMatchIn(log)
+ if (res.isEmpty) {
+ ApacheAccessLog("", "", "", "","", "", "", 0, 0, "", "")
+ }
+ else {
+ val m = res.get
+ val contentSizeSafe : Long = if (m.group(9) == "-") 0 else m.group(9).toLong
+ val formattedEndpoint : String = (if (m.group(6).charAt(m.group(6).length-1).toString == "/") m.group(6) else m.group(6).concat("/"))
+ 
+ ApacheAccessLog(m.group(1), m.group(2), m.group(3), m.group(4),
+ m.group(5), formattedEndpoint, m.group(7), m.group(8).toInt, contentSizeSafe, m.group(10), m.group(11))
+ }
+ }
+}
+
+package com.databricks.apps.logs.chapter1
+
+import com.databricks.apps.logs.ApacheAccessLog
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.SaveMode
+import org.apache.spark.{SparkContext, SparkConf}
+import org.apache.spark.streaming.{StreamingContext, Duration}
+
+object LogAnalyzerStreamingSQL {
+  val WINDOW_LENGTH = new Duration(86400 * 1000)//窗口计算的长度
+  val SLIDE_INTERVAL = new Duration(10 * 1000)//streaming多长时间刷新一次
+
+  def main(args: Array[String]) {
+    val sparkConf = new SparkConf().setAppName("Log Analyzer Streaming in Scala")
+    val sc = new SparkContext(sparkConf)
+
+    val sqlContext = new SQLContext(sc)
+    import sqlContext.implicits._
+    
+    val postsDF = sqlContext.load("jdbc", Map(
+                  "url" -> "jdbc:oracle:thin:blog_refdata/password@bigdatalite.rittmandev.com:1521:orcl",
+                  "dbtable" -> "BLOG_REFDATA.POST_DETAILS"))
+                  
+    postsDF.registerTempTable("posts")//拿到了历史数据，这个完全可以直接写在spark sql里，而不是streaming里
+
+    val streamingContext = new StreamingContext(sc, SLIDE_INTERVAL)
+
+    val logLinesDStream = streamingContext.textFileStream("/user/oracle/rm_logs_incoming")
+
+    val accessLogsDStream = logLinesDStream.map(ApacheAccessLog.parseLogLine).cache()//这里使用了cache，就不用checkpoint了吗？|| 在streaming里直接把读进来的数据进行解析，尽早的把它转换成结构化的数据，之后，直接进行toDF就可以了
+
+    val windowDStream = accessLogsDStream.window(WINDOW_LENGTH, SLIDE_INTERVAL)//这样的写法，只需要对这个dstream进行checkpoint || 要想在之后的sql中使用，而又不做checkpoint的操作，直接将他
+
+    windowDStream.foreachRDD(accessLogs => {
+      if (accessLogs.count() == 0) {
+        println("No logs received in this time interval")
+      } else {
+        accessLogs.toDF()
+
+        // Filter out bots 
+        val accessLogsFilteredDF = accessLogs
+                                      .filter( r => ! r.agent.matches(".*(spider|robot|bot|slurp|bot|monitis|Baiduspider|AhrefsBot|EasouSpider|HTTrack|Uptime|FeedFetcher|dummy).*"))
+                                      .filter( r => ! r.endpoint.matches(".*(wp-content|wp-admin|wp-includes|favicon.ico|xmlrpc.php|wp-comments-post.php).*")).toDF()
+                                      .registerTempTable("accessLogsFiltered")
+                                      
+        val topTenPostsLast24Hour = sqlContext.sql("SELECT p.POST_TITLE, p.POST_AUTHOR, COUNT(*) as total FROM accessLogsFiltered a JOIN posts p ON a.endpoint = p.POST_SLUG GROUP BY p.POST_TITLE, p.POST_AUTHOR ORDER BY total DESC LIMIT 10 ")                 
+        
+        // Persist top ten table for this window to HDFS as parquet file
+        
+        topTenPostsLast24Hour.save("/user/oracle/rm_logs_batch_output/topTenPostsLast24Hour.parquet", "parquet", SaveMode.Overwrite)      
+      }
+    })
+
+    streamingContext.start()
+    streamingContext.awaitTermination()
+  }
+}
