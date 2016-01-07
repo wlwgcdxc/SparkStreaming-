@@ -1,0 +1,49 @@
+//scala版 累计增量，streaming结合sql，建表查数据,数据从kafka那里来
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.rdd.RDD
+import org.apache.spark.streaming.{Time, Minutes, Seconds, StreamingContext, Duration}
+import org.apache.spark.util.IntParam
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.storage.StorageLevel
+import java.util.HashMap
+import org.apache.kafka.clients.producer.{ProducerConfig, KafkaProducer, ProducerRecord}
+import org.apache.spark.streaming._
+import org.apache.spark.streaming.kafka._
+
+case class Record(word: String)
+
+object SQLContextSingleton {
+  @transient  private var instance: SQLContext = _
+  def getInstance(sparkContext: SparkContext): SQLContext = {
+    if (instance == null) {
+      instance = new SQLContext(sparkContext)
+    }
+    instance
+  }
+}
+
+val ssc = new StreamingContext(sc, Seconds(2))
+
+val topics = "test2"
+val numThreads = "1"
+val topicMap = topics.split(",").map((_, numThreads.toInt)).toMap
+val zkQuorum = "localhost:2181"
+val group = "test"
+
+val lines = KafkaUtils.createStream(ssc, zkQuorum, group, topicMap).map(_._2)
+val words = lines.flatMap(_.split(" ")).cache()
+val windowDStream = words.window(Seconds(86400), Seconds(2))
+
+windowDStream.foreachRDD((rdd: RDD[String], time: Time) => {
+      val sqlContext = SQLContextSingleton.getInstance(rdd.sparkContext)
+      import sqlContext.implicits._
+      val wordsDataFrame = rdd.map(w => Record(w)).toDF()
+      wordsDataFrame.registerTempTable("words")
+      val wordCountsDataFrame = sqlContext.sql("select word, count(*) as total from words group by word")
+      println(s"========= $time =========")
+      wordCountsDataFrame.show()
+    })
+
+ssc.start()
+ssc.awaitTermination()
